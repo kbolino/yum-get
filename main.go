@@ -19,8 +19,7 @@ import (
 
 var (
 	flagList    = flag.Bool("list", false, "list packages in repository instead of downloading")
-	flagPackage = flag.String("package", "", "package to download, in name-ver-rel format")
-	flagRepo    = flag.String("repo", "", "Yum repository to use")
+	flagRepo    = flag.String("repo", "", "URL of Yum repositoryto use")
 	flagVerbose = flag.Bool("verbose", false, "enable debugging info to stderr")
 )
 
@@ -30,13 +29,23 @@ var (
 )
 
 func main() {
+	flag.Usage = func() {
+		out := flag.CommandLine.Output()
+		fmt.Fprintf(out, "USAGE: %s [options] -repo URL -list\n", os.Args[0])
+		fmt.Fprintf(out, "       %s [options] -repo URL PKG ...\n", os.Args[0])
+		fmt.Fprintln(out, "Lists or downloads RPM packages from a Yum repository.")
+		fmt.Fprintln(out, "Specify each PKG to download as name-ver-rel")
+		fmt.Fprintln(out, "\nOPTIONS:")
+		flag.PrintDefaults()
+	}
 	flag.Parse()
 	os.Exit(run())
 }
 
 func run() int {
-	if (!*flagList && *flagPackage == "") || (*flagList && *flagPackage != "") {
-		errorf("must specify exactly one of -list or -package")
+	pkgsToGet := flag.Args()
+	if (!*flagList && len(pkgsToGet) == 0) || (*flagList && len(pkgsToGet) != 0) {
+		errorf("must specify exactly one of -list or package names to download")
 		return 1
 	}
 	repoURL, err := url.Parse(*flagRepo)
@@ -107,59 +116,61 @@ func run() int {
 		}
 		return 0
 	}
-	pkgParts := rePkgName.FindStringSubmatch(*flagPackage)
-	if len(pkgParts) != 4 {
-		errorf("must specify package in name-ver-rel format, e.g. foobar-1.2.3-4")
-		return 1
-	}
-	pkgName, pkgVer, pkgRel := pkgParts[1], pkgParts[2], pkgParts[3]
-	if pkgName == "" || pkgVer == "" || pkgRel == "" {
-		errorf("must specify name, ver, and rel parameters of package as nonempty strings")
-		return 1
-	}
-	debugf("searching for package name %s, ver %s, rel %s", pkgName, pkgVer, pkgRel)
-	var lastPkg yum.Package
-	for _, pkg := range primary.PackageList {
-		if pkg.Name == pkgName && pkg.Version.Ver == pkgVer && pkg.Version.Rel == pkgRel {
-			if lastPkg.Name != "" {
-				if lastPkg.Version.Epoch < pkg.Version.Epoch {
+	for _, pkgToGet := range pkgsToGet {
+		pkgParts := rePkgName.FindStringSubmatch(pkgToGet)
+		if len(pkgParts) != 4 {
+			errorf("must specify package in name-ver-rel format, e.g. foobar-1.2.3-4")
+			return 1
+		}
+		pkgName, pkgVer, pkgRel := pkgParts[1], pkgParts[2], pkgParts[3]
+		if pkgName == "" || pkgVer == "" || pkgRel == "" {
+			errorf("must specify name, ver, and rel parameters of package as nonempty strings")
+			return 1
+		}
+		debugf("searching for package name %s, ver %s, rel %s", pkgName, pkgVer, pkgRel)
+		var lastPkg yum.Package
+		for _, pkg := range primary.PackageList {
+			if pkg.Name == pkgName && pkg.Version.Ver == pkgVer && pkg.Version.Rel == pkgRel {
+				if lastPkg.Name != "" {
+					if lastPkg.Version.Epoch < pkg.Version.Epoch {
+						lastPkg = pkg
+					}
+				} else {
 					lastPkg = pkg
 				}
-			} else {
-				lastPkg = pkg
 			}
 		}
+		if lastPkg.Name == "" {
+			errorf("failed to find package %s in repository", pkgToGet)
+			return 1
+		}
+		debugf("using epoch %d", lastPkg.Version.Epoch)
+		pkgRelURL, err := url.Parse(lastPkg.Location.Href)
+		if err != nil {
+			errorf("failed to parse package location: %s", err)
+			return 1
+		}
+		pkgURL := repoURL.ResolveReference(pkgRelURL)
+		debugf("downloading package from %s", pkgURL)
+		response, err = get(pkgURL)
+		if err != nil {
+			errorf("failed to download package: %s", err)
+			return 1
+		}
+		fileName := path.Base(pkgURL.Path)
+		file, err := os.Create(fileName)
+		if err != nil {
+			errorf("failed to open output file: %s", err)
+			return 1
+		}
+		if n, err := io.Copy(file, response.Body); err != nil {
+			errorf("failed to copy package to output file: %s", err)
+			return 1
+		} else {
+			debugf("downloaded %d bytes", n)
+		}
+		fmt.Println(fileName)
 	}
-	if lastPkg.Name == "" {
-		errorf("failed to find package %s in repository", *flagPackage)
-		return 1
-	}
-	debugf("using epoch %d", lastPkg.Version.Epoch)
-	pkgRelURL, err := url.Parse(lastPkg.Location.Href)
-	if err != nil {
-		errorf("failed to parse package location: %s", err)
-		return 1
-	}
-	pkgURL := repoURL.ResolveReference(pkgRelURL)
-	debugf("downloading package from %s", pkgURL)
-	response, err = get(pkgURL)
-	if err != nil {
-		errorf("failed to download package: %s", err)
-		return 1
-	}
-	fileName := path.Base(pkgURL.Path)
-	file, err := os.Create(fileName)
-	if err != nil {
-		errorf("failed to open output file: %s", err)
-		return 1
-	}
-	if n, err := io.Copy(file, response.Body); err != nil {
-		errorf("failed to copy package to output file: %s", err)
-		return 1
-	} else {
-		debugf("downloaded %d bytes", n)
-	}
-	fmt.Println(fileName)
 	return 0
 }
 
