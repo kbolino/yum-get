@@ -18,8 +18,9 @@ import (
 )
 
 var (
+	flagForce   = flag.Bool("force", false, "overwrite existing files")
 	flagList    = flag.Bool("list", false, "list packages in repository instead of downloading")
-	flagRepo    = flag.String("repo", "", "URL of Yum repositoryto use")
+	flagRepo    = flag.String("repo", "", "URL of Yum repository to use")
 	flagVerbose = flag.Bool("verbose", false, "enable debugging info to stderr")
 )
 
@@ -31,8 +32,8 @@ var (
 func main() {
 	flag.Usage = func() {
 		out := flag.CommandLine.Output()
-		fmt.Fprintf(out, "USAGE: %s [options] -repo URL -list\n", os.Args[0])
-		fmt.Fprintf(out, "       %s [options] -repo URL PKG ...\n", os.Args[0])
+		fmt.Fprintf(out, "USAGE: %s [options] -list\n", os.Args[0])
+		fmt.Fprintf(out, "       %s [options] PKG ...\n", os.Args[0])
 		fmt.Fprintln(out, "Lists or downloads RPM packages from a Yum repository.")
 		fmt.Fprintln(out, "Specify each PKG to download as name-ver-rel")
 		fmt.Fprintln(out, "\nOPTIONS:")
@@ -116,60 +117,56 @@ func run() int {
 		}
 		return 0
 	}
+	pkgIndex := make(map[string][]yum.Package, len(primary.PackageList))
+	for _, pkg := range primary.PackageList {
+		pkgIndex[pkg.Name] = append(pkgIndex[pkg.Name], pkg)
+	}
 	for _, pkgToGet := range pkgsToGet {
 		pkgParts := rePkgName.FindStringSubmatch(pkgToGet)
 		if len(pkgParts) != 4 {
-			errorf("must specify package in name-ver-rel format, e.g. foobar-1.2.3-4")
+			errorf("package not in name-ver-rel format: %s", pkgToGet)
 			return 1
 		}
-		pkgName, pkgVer, pkgRel := pkgParts[1], pkgParts[2], pkgParts[3]
-		if pkgName == "" || pkgVer == "" || pkgRel == "" {
-			errorf("must specify name, ver, and rel parameters of package as nonempty strings")
+		name, ver, rel := pkgParts[1], pkgParts[2], pkgParts[3]
+		debugf("searching for package name %s, ver %s, rel %s", name, ver, rel)
+		pkgList := pkgIndex[name]
+		if len(pkgList) == 0 {
+			errorf("failed to find package in repository: %s", pkgToGet)
 			return 1
 		}
-		debugf("searching for package name %s, ver %s, rel %s", pkgName, pkgVer, pkgRel)
-		var lastPkg yum.Package
-		for _, pkg := range primary.PackageList {
-			if pkg.Name == pkgName && pkg.Version.Ver == pkgVer && pkg.Version.Rel == pkgRel {
-				if lastPkg.Name != "" {
-					if lastPkg.Version.Epoch < pkg.Version.Epoch {
-						lastPkg = pkg
-					}
-				} else {
-					lastPkg = pkg
+		for _, pkg := range pkgList {
+			pkgRelURL, err := url.Parse(pkg.Location.Href)
+			if err != nil {
+				errorf("failed to parse package location: %s", err)
+				return 1
+			}
+			pkgURL := repoURL.ResolveReference(pkgRelURL)
+			debugf("downloading package from %s", pkgURL)
+			response, err = get(pkgURL)
+			if err != nil {
+				errorf("failed to download package: %s", err)
+				return 1
+			}
+			fileName := path.Base(pkgURL.Path)
+			if !*flagForce {
+				if stat, _ := os.Stat(fileName); stat != nil {
+					errorf("file already exists: %s", fileName)
+					return 1
 				}
 			}
+			file, err := os.Create(fileName)
+			if err != nil {
+				errorf("failed to open output file: %s", err)
+				return 1
+			}
+			if n, err := io.Copy(file, response.Body); err != nil {
+				errorf("failed to copy package to output file: %s", err)
+				return 1
+			} else {
+				debugf("downloaded %d bytes", n)
+			}
+			fmt.Println(fileName)
 		}
-		if lastPkg.Name == "" {
-			errorf("failed to find package %s in repository", pkgToGet)
-			return 1
-		}
-		debugf("using epoch %d", lastPkg.Version.Epoch)
-		pkgRelURL, err := url.Parse(lastPkg.Location.Href)
-		if err != nil {
-			errorf("failed to parse package location: %s", err)
-			return 1
-		}
-		pkgURL := repoURL.ResolveReference(pkgRelURL)
-		debugf("downloading package from %s", pkgURL)
-		response, err = get(pkgURL)
-		if err != nil {
-			errorf("failed to download package: %s", err)
-			return 1
-		}
-		fileName := path.Base(pkgURL.Path)
-		file, err := os.Create(fileName)
-		if err != nil {
-			errorf("failed to open output file: %s", err)
-			return 1
-		}
-		if n, err := io.Copy(file, response.Body); err != nil {
-			errorf("failed to copy package to output file: %s", err)
-			return 1
-		} else {
-			debugf("downloaded %d bytes", n)
-		}
-		fmt.Println(fileName)
 	}
 	return 0
 }
