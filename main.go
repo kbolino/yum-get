@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"regexp"
 	"strings"
 
 	"github.com/kbolino/yum-get/yum"
@@ -25,6 +26,7 @@ var (
 
 var (
 	repomdRelURL = mustParseURL("repodata/repomd.xml")
+	rePkgName    = regexp.MustCompile(`^(.+)-([^-]+)-([^-]+)$`)
 )
 
 func main() {
@@ -105,30 +107,30 @@ func run() int {
 		}
 		return 0
 	}
-	pkgParts := strings.Split(*flagPackage, "-")
-	if len(pkgParts) != 3 {
+	pkgParts := rePkgName.FindStringSubmatch(*flagPackage)
+	if len(pkgParts) != 4 {
 		errorf("must specify package in name-ver-rel format, e.g. foobar-1.2.3-4")
 		return 1
 	}
-	pkgName, pkgVer, pkgRel := pkgParts[0], pkgParts[1], pkgParts[2]
+	pkgName, pkgVer, pkgRel := pkgParts[1], pkgParts[2], pkgParts[3]
 	if pkgName == "" || pkgVer == "" || pkgRel == "" {
 		errorf("must specify name, ver, and rel parameters of package as nonempty strings")
 		return 1
 	}
 	debugf("searching for package name %s, ver %s, rel %s", pkgName, pkgVer, pkgRel)
-	var lastPkg *yum.Package
+	var lastPkg yum.Package
 	for _, pkg := range primary.PackageList {
 		if pkg.Name == pkgName && pkg.Version.Ver == pkgVer && pkg.Version.Rel == pkgRel {
-			if lastPkg != nil {
+			if lastPkg.Name != "" {
 				if lastPkg.Version.Epoch < pkg.Version.Epoch {
-					lastPkg = &pkg
+					lastPkg = pkg
 				}
 			} else {
-				lastPkg = &pkg
+				lastPkg = pkg
 			}
 		}
 	}
-	if lastPkg == nil {
+	if lastPkg.Name == "" {
 		errorf("failed to find package %s in repository", *flagPackage)
 		return 1
 	}
